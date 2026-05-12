@@ -146,6 +146,14 @@ func TestWithPadding(t *testing.T) {
 		assert.Panics(t, func() { RFC1924.WithPadding('\r') })
 	})
 
+	t.Run("space_padding", func(t *testing.T) {
+		assert.Panics(t, func() { RFC1924.WithPadding(' ') })
+	})
+
+	t.Run("tab_padding", func(t *testing.T) {
+		assert.Panics(t, func() { RFC1924.WithPadding('\t') })
+	})
+
 	t.Run("padding_in_alphabet", func(t *testing.T) {
 		assert.Panics(t, func() {
 			RFC1924.WithPadding('0') // '0' is in RFC1924 alphabet

@@ -66,10 +66,10 @@ func NewEncoding(encoder string) *Encoding {
 
 // WithPadding creates a new Encoding identical to enc except with a specified
 // padding character, or NoPadding to disable padding. The padding character
-// must be an ASCII character, must not be '\r' or '\n', and must not be
-// contained in the encoding alphabet.
+// must be an ASCII character, must not be a whitespace character ('\r', '\n',
+// ' ', '\t'), and must not be contained in the encoding alphabet.
 func (enc Encoding) WithPadding(padding rune) *Encoding {
-	if padding == '\r' || padding == '\n' {
+	if padding == '\r' || padding == '\n' || padding == ' ' || padding == '\t' {
 		panic("base85: invalid padding character")
 	}
 
