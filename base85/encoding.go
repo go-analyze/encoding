@@ -515,15 +515,20 @@ func NewDecoder(enc *Encoding, r io.Reader) io.Reader {
 	return &decoder{enc: enc, r: r}
 }
 
+// maxConsecutiveEmptyReads bounds retries when the underlying reader returns (0, nil).
+const maxConsecutiveEmptyReads = 100
+
 type decoder struct {
-	enc     *Encoding
-	r       io.Reader
-	readBuf [1024]byte
-	encBuf  [4]byte // buffer for incomplete encoded blocks (max 4 chars waiting for 5th)
-	nenc    int     // number of valid bytes in encBuf
-	outBuf  []byte  // buffered decoded output
-	err     error
-	eof     bool
+	enc        *Encoding
+	r          io.Reader
+	readBuf    [1024]byte
+	encBuf     [4]byte // buffer for incomplete encoded blocks (max 4 chars waiting for 5th)
+	nenc       int     // number of valid bytes in encBuf
+	outBuf     []byte  // buffered decoded output
+	err        error
+	eof        bool
+	streamPos  int64 // total bytes consumed from r (start of next read)
+	emptyReads int   // consecutive (0, nil) reads
 }
 
 func (d *decoder) Read(p []byte) (n int, err error) {
@@ -553,10 +558,19 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 			d.eof = true
 		}
 		if nr == 0 && !d.eof && d.err == nil {
-			// reader returned (0, nil), yield and retry
+			// reader returned (0, nil), bounded retry then give up
+			d.emptyReads++
+			if d.emptyReads >= maxConsecutiveEmptyReads {
+				d.err = io.ErrNoProgress
+				return 0, d.err
+			}
 			runtime.Gosched()
 			continue
 		}
+		d.emptyReads = 0
+
+		chunkStart := d.streamPos
+		d.streamPos += int64(nr)
 
 		// filter whitespace and padding, combine with buffered encoded data
 		filtered := make([]byte, 0, d.nenc+nr)
@@ -569,7 +583,7 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 			} else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') && d.enc.decodeMap[c] == 0xFF {
 				continue
 			} else if d.enc.decodeMap[c] == 0xFF {
-				d.err = CorruptInputError(i)
+				d.err = CorruptInputError(chunkStart + int64(i))
 				return 0, d.err
 			}
 			filtered = append(filtered, c)
@@ -600,7 +614,8 @@ func (d *decoder) Read(p []byte) (n int, err error) {
 		decoded := make([]byte, d.enc.DecodedLen(len(filtered)))
 		nd, decErr := d.enc.decodeFiltered(decoded, filtered)
 		if decErr != nil {
-			d.err = decErr
+			// approximate offset, error lies within this read's chunk
+			d.err = CorruptInputError(chunkStart)
 			// still return what we decoded
 			n = copy(p, decoded[:nd])
 			if n < nd {

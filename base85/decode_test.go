@@ -5,6 +5,7 @@ import (
 	"encoding/ascii85"
 	"io"
 	"testing"
+	"testing/iotest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,6 +169,31 @@ func TestDecoderOverflow(t *testing.T) {
 			assert.ErrorAs(t, err, &corruptErr)
 		})
 	}
+}
+
+func TestDecoderErrorOffset(t *testing.T) {
+	t.Parallel()
+
+	// 10 valid chars then an invalid byte; one-byte reader forces chunk boundaries
+	input := "AAAAAAAAAA\x00"
+	dec := NewDecoder(ascii85Encoding, iotest.OneByteReader(bytes.NewReader([]byte(input))))
+	_, err := io.ReadAll(dec)
+
+	var corruptErr CorruptInputError
+	require.ErrorAs(t, err, &corruptErr)
+	assert.Equal(t, int64(10), int64(corruptErr))
+}
+
+type noProgressReader struct{}
+
+func (noProgressReader) Read(p []byte) (int, error) { return 0, nil }
+
+func TestDecoderNoProgress(t *testing.T) {
+	t.Parallel()
+
+	dec := NewDecoder(ascii85Encoding, noProgressReader{})
+	_, err := dec.Read(make([]byte, 16))
+	assert.ErrorIs(t, err, io.ErrNoProgress)
 }
 
 func TestDecodeWhitespace(t *testing.T) {
