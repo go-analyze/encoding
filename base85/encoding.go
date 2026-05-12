@@ -225,7 +225,11 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 			padCount++
 			if nb+padCount == 5 {
 				// block complete - decode and reset
-				n += decodePartial(dst[n:], digits[:], nb)
+				written := decodePartial(dst[n:], digits[:], nb)
+				if written < 0 {
+					return n, CorruptInputError(i)
+				}
+				n += written
 				nb = 0
 				padCount = 0
 			}
@@ -246,7 +250,10 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 		nb++
 
 		if nb == 5 {
-			val := digits[0]*pow85_4 + digits[1]*pow85_3 + digits[2]*pow85_2 + digits[3]*pow85_1 + digits[4]
+			val := uint64(digits[0])*pow85_4 + uint64(digits[1])*pow85_3 + uint64(digits[2])*pow85_2 + uint64(digits[3])*pow85_1 + uint64(digits[4])
+			if val>>32 != 0 {
+				return n, CorruptInputError(i)
+			}
 			dst[n] = byte(val >> 24)
 			dst[n+1] = byte(val >> 16)
 			dst[n+2] = byte(val >> 8)
@@ -261,50 +268,63 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 		if nb == 1 || padCount > 0 {
 			return n, CorruptInputError(len(src))
 		}
-		n += decodePartial(dst[n:], digits[:], nb)
+		written := decodePartial(dst[n:], digits[:], nb)
+		if written < 0 {
+			return n, CorruptInputError(len(src))
+		}
+		n += written
 	}
 
 	return n, nil
 }
 
 // decodePartial decodes 2-4 accumulated digit values into output bytes.
+// Returns the number of bytes written, or -1 if the value overflows uint32.
 func decodePartial(dst []byte, digits []uint32, nb int) int {
 	// fill remaining with 84 (highest digit) for implicit padding
 	for i := nb; i < 5; i++ {
 		digits[i] = 84
 	}
-	val := digits[0]*pow85_4 + digits[1]*pow85_3 + digits[2]*pow85_2 + digits[3]*pow85_1 + digits[4]
+	val := uint64(digits[0])*pow85_4 + uint64(digits[1])*pow85_3 + uint64(digits[2])*pow85_2 + uint64(digits[3])*pow85_1 + uint64(digits[4])
+	if val>>32 != 0 {
+		return -1
+	}
+	v := uint32(val)
 	for i := 0; i < nb-1; i++ {
-		dst[i] = byte(val >> 24)
-		val <<= 8
+		dst[i] = byte(v >> 24)
+		v <<= 8
 	}
 	return nb - 1
 }
 
 // decodeBlock decodes 2-5 base85 alphabet bytes into 1-4 output bytes.
-// Returns the number of bytes written to dst. Caller must ensure all bytes
-// in src are valid alphabet characters (not padding, not invalid).
+// Returns the number of bytes written to dst, or -1 if the value overflows
+// uint32. Caller must ensure all bytes in src are valid alphabet characters
+// (not padding, not invalid).
 func (enc *Encoding) decodeBlock(dst, src []byte) int {
 	// initialize with highest alphabet index (84) for implicit padding
-	d0, d1, d2, d3, d4 := uint32(84), uint32(84), uint32(84), uint32(84), uint32(84)
+	d0, d1, d2, d3, d4 := uint64(84), uint64(84), uint64(84), uint64(84), uint64(84)
 
 	// map input bytes to digit values
 	switch len(src) {
 	case 5:
-		d4 = uint32(enc.decodeMap[src[4]])
+		d4 = uint64(enc.decodeMap[src[4]])
 		fallthrough
 	case 4:
-		d3 = uint32(enc.decodeMap[src[3]])
+		d3 = uint64(enc.decodeMap[src[3]])
 		fallthrough
 	case 3:
-		d2 = uint32(enc.decodeMap[src[2]])
+		d2 = uint64(enc.decodeMap[src[2]])
 		fallthrough
 	case 2:
-		d1 = uint32(enc.decodeMap[src[1]])
-		d0 = uint32(enc.decodeMap[src[0]])
+		d1 = uint64(enc.decodeMap[src[1]])
+		d0 = uint64(enc.decodeMap[src[0]])
 	}
 
 	val := d0*pow85_4 + d1*pow85_3 + d2*pow85_2 + d3*pow85_1 + d4
+	if val>>32 != 0 {
+		return -1
+	}
 
 	// output length: 5 chars -> 4 bytes, otherwise len-1
 	// only write the bytes we actually produce
@@ -365,7 +385,11 @@ func (enc *Encoding) decodeFiltered(dst, src []byte) (n int, err error) {
 			}
 		}
 
-		n += enc.decodeBlock(dst[n:], src[:dataLen])
+		written := enc.decodeBlock(dst[n:], src[:dataLen])
+		if written < 0 {
+			return n, CorruptInputError(consumed)
+		}
+		n += written
 		src = src[5:]
 		consumed += 5
 	}
@@ -384,7 +408,11 @@ func (enc *Encoding) decodeFiltered(dst, src []byte) (n int, err error) {
 				return n, CorruptInputError(consumed + i)
 			}
 		}
-		n += enc.decodeBlock(dst[n:], src)
+		written := enc.decodeBlock(dst[n:], src)
+		if written < 0 {
+			return n, CorruptInputError(consumed)
+		}
+		n += written
 	}
 
 	return n, nil

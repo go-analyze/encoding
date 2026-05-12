@@ -120,16 +120,48 @@ func TestDecodeCorruptInput(t *testing.T) {
 
 	tests := []struct {
 		name  string
+		enc   *Encoding
 		input string
 	}{
-		{"invalid_char", "hello\x00world"},
-		{"out_of_alphabet", "~~~~~"},
-		{"single_trailing_char", "AAAAA0"}, // 5 valid chars + 1 trailing (invalid)
+		{"invalid_char", ascii85Encoding, "hello\x00world"},
+		{"out_of_alphabet", ascii85Encoding, "~~~~~"},
+		{"single_trailing_char", ascii85Encoding, "AAAAA0"}, // 5 valid chars + 1 trailing (invalid)
+		// overflow: in-alphabet values whose decoded uint32 would exceed MaxUint32
+		{"overflow_full_block", ascii85Encoding, "uuuuu"}, // 84*85^4 + ... + 84 > 2^32-1
+		{"overflow_partial_4", ascii85Encoding, "uuuu"},   // partial block, implicit 84 padding overflows
+		{"overflow_partial_3", ascii85Encoding, "uuu"},
+		{"overflow_partial_2", ascii85Encoding, "uu"},
+		{"overflow_rfc1924", RFC1924, "~~~~~"}, // `~` is the highest digit (84) in RFC1924
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ascii85Encoding.DecodeString(tc.input)
+			_, err := tc.enc.DecodeString(tc.input)
+			require.Error(t, err)
+
+			var corruptErr CorruptInputError
+			assert.ErrorAs(t, err, &corruptErr)
+		})
+	}
+}
+
+func TestDecoderOverflow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		enc   *Encoding
+		input string
+	}{
+		{"full_block", ascii85Encoding, "uuuuu"},
+		{"partial_tail", ascii85Encoding, "AAAAAuuuu"}, // valid block then overflow partial
+		{"rfc1924", RFC1924, "~~~~~"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := NewDecoder(tc.enc, bytes.NewReader([]byte(tc.input)))
+			_, err := io.ReadAll(dec)
 			require.Error(t, err)
 
 			var corruptErr CorruptInputError
