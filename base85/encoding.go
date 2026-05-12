@@ -74,7 +74,7 @@ func (enc Encoding) WithPadding(padding rune) *Encoding {
 	}
 
 	if padding != NoPadding {
-		if padding > 127 {
+		if padding < 0 || padding > 127 {
 			panic("base85: padding character must be ASCII")
 		}
 		for _, c := range enc.encode {
@@ -265,7 +265,8 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 
 	// handle remaining digits (unpadded case)
 	if nb > 0 {
-		if nb == 1 || padCount > 0 {
+		// with padding enabled, the trailing block must be padded to 5 chars
+		if nb == 1 || padCount > 0 || hasPadding {
 			return n, CorruptInputError(len(src))
 		}
 		written := decodePartial(dst[n:], digits[:], nb)
@@ -394,16 +395,13 @@ func (enc *Encoding) decodeFiltered(dst, src []byte) (n int, err error) {
 		consumed += 5
 	}
 
-	// handle remaining 1-4 chars (only valid when padding is disabled or no padding present)
+	// handle remaining 1-4 chars (only valid when padding is disabled)
 	if len(src) > 0 {
-		if len(src) == 1 {
+		// with padding enabled, all blocks must be padded to 5 chars
+		if len(src) == 1 || enc.padChar != NoPadding {
 			return n, CorruptInputError(consumed)
 		}
-		// remaining chars cannot contain padding
 		for i, c := range src {
-			if enc.padChar != NoPadding && rune(c) == enc.padChar {
-				return n, CorruptInputError(consumed + i)
-			}
 			if enc.decodeMap[c] == 0xFF {
 				return n, CorruptInputError(consumed + i)
 			}

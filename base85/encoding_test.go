@@ -157,6 +157,10 @@ func TestWithPadding(t *testing.T) {
 			RFC1924.WithPadding('é') // non-ASCII character
 		})
 	})
+
+	t.Run("negative_padding", func(t *testing.T) {
+		assert.Panics(t, func() { RFC1924.WithPadding(-2) })
+	})
 }
 
 func TestEncodedLen(t *testing.T) {

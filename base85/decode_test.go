@@ -133,6 +133,11 @@ func TestDecodeCorruptInput(t *testing.T) {
 		{"overflow_partial_3", ascii85Encoding, "uuu"},
 		{"overflow_partial_2", ascii85Encoding, "uu"},
 		{"overflow_rfc1924", RFC1924, "~~~~~"}, // `~` is the highest digit (84) in RFC1924
+		// with padding enabled, unpadded trailing blocks are invalid (must use NoPadding for lenient decode)
+		{"padded_unpadded_2", RFC1924.WithPadding('.'), "00"},
+		{"padded_unpadded_3", RFC1924.WithPadding('.'), "000"},
+		{"padded_unpadded_4", RFC1924.WithPadding('.'), "0000"},
+		{"padded_full_plus_unpadded", RFC1924.WithPadding('.'), "0000000"}, // 5 valid + 2 unpadded
 	}
 
 	for _, tc := range tests {
@@ -288,4 +293,31 @@ func TestNewDecoderWithWhitespace(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, input, decoded)
+}
+
+func TestNewDecoderPaddedRequiresPadding(t *testing.T) {
+	t.Parallel()
+
+	paddedEnc := RFC1924.WithPadding('.')
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"unpadded_2", "00"},
+		{"unpadded_3", "000"},
+		{"unpadded_4", "0000"},
+		{"full_plus_unpadded", "0000000"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := NewDecoder(paddedEnc, bytes.NewReader([]byte(tc.input)))
+			_, err := io.ReadAll(dec)
+			require.Error(t, err)
+
+			var corruptErr CorruptInputError
+			assert.ErrorAs(t, err, &corruptErr)
+		})
+	}
 }
