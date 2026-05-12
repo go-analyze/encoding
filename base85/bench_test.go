@@ -1,7 +1,9 @@
 package base85
 
 import (
+	"bytes"
 	"encoding/ascii85"
+	"io"
 	"testing"
 )
 
@@ -33,6 +35,40 @@ func BenchmarkEncodeAscii85(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		ascii85.Encode(dst, benchData)
+	}
+}
+
+func BenchmarkStreamEncodeBase85(b *testing.B) {
+	var payload []byte
+	for i := 0; i < 64; i++ {
+		payload = append(payload, benchData...)
+	}
+	var sink bytes.Buffer
+	sink.Grow(RFC1924.EncodedLen(len(payload)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		sink.Reset()
+		w := NewEncoder(RFC1924, &sink)
+		_, _ = w.Write(payload)
+		_ = w.Close()
+	}
+}
+
+func BenchmarkStreamDecodeBase85(b *testing.B) {
+	// build a larger payload so a stream Read covers many blocks
+	var payload []byte
+	for i := 0; i < 64; i++ {
+		payload = append(payload, benchData...)
+	}
+	encoded := RFC1924.EncodeToString(payload)
+	src := []byte(encoded)
+	dst := make([]byte, len(payload))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		r := NewDecoder(RFC1924, bytes.NewReader(src))
+		_, _ = io.ReadFull(r, dst)
 	}
 }
 
