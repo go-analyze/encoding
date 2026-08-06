@@ -281,6 +281,26 @@ func TestStreamEncoder(t *testing.T) {
 	}
 }
 
+func TestStreamEncoderClose(t *testing.T) {
+	t.Parallel()
+
+	t.Run("double_close", func(t *testing.T) {
+		var buf bytes.Buffer
+		encoder := NewEncoder(RFC1924, &buf)
+		_, err := encoder.Write([]byte{0x01, 0x02, 0x03, 0x04, 0x05}) // full block + partial
+		require.NoError(t, err)
+
+		require.NoError(t, encoder.Close())
+		expected := buf.String()
+		require.NoError(t, encoder.Close())
+		assert.Equal(t, expected, buf.String())
+
+		decoded, err := RFC1924.DecodeString(buf.String())
+		require.NoError(t, err)
+		assert.Equal(t, []byte{0x01, 0x02, 0x03, 0x04, 0x05}, decoded)
+	})
+}
+
 func TestStreamDecoder(t *testing.T) {
 	t.Parallel()
 

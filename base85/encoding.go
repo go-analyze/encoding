@@ -500,6 +500,7 @@ func (e *encoder) Close() error {
 	if e.nbuf > 0 {
 		encoded := make([]byte, e.enc.EncodedLen(e.nbuf))
 		e.enc.Encode(encoded, e.buf[:e.nbuf])
+		e.nbuf = 0
 		if _, e.err = e.w.Write(encoded); e.err != nil {
 			return e.err
 		}
