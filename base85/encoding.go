@@ -225,7 +225,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 			padCount++
 			if nb+padCount == 5 {
 				// block complete - decode and reset
-				written := decodePartial(dst[n:], digits[:], nb)
+				written := decodeBlock(dst[n:], &digits, nb)
 				if written < 0 {
 					return n, CorruptInputError(i)
 				}
@@ -250,6 +250,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 		nb++
 
 		if nb == 5 {
+			// hot path: inline copy of decodeBlock(nb=5) to avoid a per-block call
 			val := uint64(digits[0])*pow85_4 + uint64(digits[1])*pow85_3 + uint64(digits[2])*pow85_2 + uint64(digits[3])*pow85_1 + uint64(digits[4])
 			if val>>32 != 0 {
 				return n, CorruptInputError(i)
@@ -269,7 +270,7 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 		if nb == 1 || padCount > 0 || hasPadding {
 			return n, CorruptInputError(len(src))
 		}
-		written := decodePartial(dst[n:], digits[:], nb)
+		written := decodeBlock(dst[n:], &digits, nb)
 		if written < 0 {
 			return n, CorruptInputError(len(src))
 		}
@@ -279,9 +280,10 @@ func (enc *Encoding) Decode(dst, src []byte) (n int, err error) {
 	return n, nil
 }
 
-// decodePartial decodes 2-4 accumulated digit values into output bytes.
-// Returns the number of bytes written, or -1 if the value overflows uint32.
-func decodePartial(dst []byte, digits []uint32, nb int) int {
+// decodeBlock decodes the first nb (2-5) digit values into nb-1 output bytes,
+// treating digits beyond nb as the max digit 84 for implicit padding. Returns
+// the number of bytes written to dst, or -1 if the value overflows uint32.
+func decodeBlock(dst []byte, digits *[5]uint32, nb int) int {
 	// fill remaining with 84 (highest digit) for implicit padding
 	for i := nb; i < 5; i++ {
 		digits[i] = 84
@@ -290,46 +292,8 @@ func decodePartial(dst []byte, digits []uint32, nb int) int {
 	if val>>32 != 0 {
 		return -1
 	}
-	v := uint32(val)
-	for i := 0; i < nb-1; i++ {
-		dst[i] = byte(v >> 24)
-		v <<= 8
-	}
-	return nb - 1
-}
-
-// decodeBlock decodes 2-5 base85 alphabet bytes into 1-4 output bytes.
-// Returns the number of bytes written to dst, or -1 if the value overflows
-// uint32. Caller must ensure all bytes in src are valid alphabet characters
-// (not padding, not invalid).
-func (enc *Encoding) decodeBlock(dst, src []byte) int {
-	// initialize with highest alphabet index (84) for implicit padding
-	d0, d1, d2, d3, d4 := uint64(84), uint64(84), uint64(84), uint64(84), uint64(84)
-
-	// map input bytes to digit values
-	switch len(src) {
-	case 5:
-		d4 = uint64(enc.decodeMap[src[4]])
-		fallthrough
-	case 4:
-		d3 = uint64(enc.decodeMap[src[3]])
-		fallthrough
-	case 3:
-		d2 = uint64(enc.decodeMap[src[2]])
-		fallthrough
-	case 2:
-		d1 = uint64(enc.decodeMap[src[1]])
-		d0 = uint64(enc.decodeMap[src[0]])
-	}
-
-	val := d0*pow85_4 + d1*pow85_3 + d2*pow85_2 + d3*pow85_1 + d4
-	if val>>32 != 0 {
-		return -1
-	}
-
-	// output length: 5 chars -> 4 bytes, otherwise len-1
 	// only write the bytes we actually produce
-	switch len(src) {
+	switch nb {
 	case 5:
 		dst[3] = byte(val)
 		fallthrough
@@ -342,11 +306,7 @@ func (enc *Encoding) decodeBlock(dst, src []byte) int {
 	case 2:
 		dst[0] = byte(val >> 24)
 	}
-
-	if len(src) == 5 {
-		return 4
-	}
-	return len(src) - 1
+	return nb - 1
 }
 
 // decodeFiltered decodes pre-validated and filtered input (whitespace removed,
@@ -356,6 +316,7 @@ func (enc *Encoding) decodeFiltered(dst, src []byte) (n int, err error) {
 		return 0, nil
 	}
 
+	var digits [5]uint32
 	consumed := 0
 	for len(src) >= 5 {
 		// find data length in this block (may end early due to padding)
@@ -379,14 +340,16 @@ func (enc *Encoding) decodeFiltered(dst, src []byte) (n int, err error) {
 			}
 		}
 
-		// validate all data chars are in alphabet
+		// map data chars to digit values, rejecting invalid characters
 		for i := 0; i < dataLen; i++ {
-			if enc.decodeMap[src[i]] == 0xFF {
+			d := enc.decodeMap[src[i]]
+			if d == 0xFF {
 				return n, CorruptInputError(consumed + i)
 			}
+			digits[i] = uint32(d)
 		}
 
-		written := enc.decodeBlock(dst[n:], src[:dataLen])
+		written := decodeBlock(dst[n:], &digits, dataLen)
 		if written < 0 {
 			return n, CorruptInputError(consumed)
 		}
@@ -402,11 +365,13 @@ func (enc *Encoding) decodeFiltered(dst, src []byte) (n int, err error) {
 			return n, CorruptInputError(consumed)
 		}
 		for i, c := range src {
-			if enc.decodeMap[c] == 0xFF {
+			d := enc.decodeMap[c]
+			if d == 0xFF {
 				return n, CorruptInputError(consumed + i)
 			}
+			digits[i] = uint32(d)
 		}
-		written := enc.decodeBlock(dst[n:], src)
+		written := decodeBlock(dst[n:], &digits, len(src))
 		if written < 0 {
 			return n, CorruptInputError(consumed)
 		}

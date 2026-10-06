@@ -707,7 +707,7 @@ func TestStreamDecoderReadError(t *testing.T) {
 		valid := paddedEnc.EncodeToString([]byte{0x01, 0x02, 0x03, 0x04})
 		// Invalid: "AB.C." has non-contiguous padding (all chars valid, but padding broken)
 		// The 'C' is a valid alphabet char, so it passes stream filter but fails
-		// decodeFiltered's padding validation at line 297-299
+		// decodeFiltered's padding validation
 		invalid := "AB.C."
 
 		allData := valid + invalid
