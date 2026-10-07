@@ -488,116 +488,133 @@ type decoder struct {
 	readBuf    [1024]byte
 	encBuf     [4]byte // buffer for incomplete encoded blocks (max 4 chars waiting for 5th)
 	nenc       int     // number of valid bytes in encBuf
-	outBuf     []byte  // buffered decoded output
+	filterBuf  []byte  // reusable scratch for whitespace-filtered encoded input
+	decBuf     []byte  // reusable scratch for decoded output when p is too small
+	outBuf     []byte  // decoded output staged when p could not hold it all; aliases decBuf
 	err        error
 	eof        bool
 	streamPos  int64 // total bytes consumed from r (start of next read)
 	emptyReads int   // consecutive (0, nil) reads
 }
 
+// Read decodes data into p, pulling from the underlying reader until p is
+// full, the stream ends, or an error is pending. Output buffered from an
+// earlier call is always served first.
 func (d *decoder) Read(p []byte) (n int, err error) {
-	// return buffered decoded data first
-	if len(d.outBuf) > 0 {
-		n = copy(p, d.outBuf)
-		d.outBuf = d.outBuf[n:]
-		return n, nil
-	} else if d.err != nil {
-		return 0, d.err
-	} else if d.eof {
-		return 0, io.EOF
-	}
+	for len(p) > 0 {
+		if len(d.outBuf) > 0 {
+			c := copy(p, d.outBuf)
+			d.outBuf = d.outBuf[c:]
+			p = p[c:]
+			n += c
+			continue
+		}
+		if d.err != nil {
+			return n, d.err
+		}
+		if d.eof {
+			return n, io.EOF
+		}
 
-	// loop until we have data to return or hit EOF/error
+		c := d.readChunk(p)
+		n += c
+		p = p[c:]
+	}
+	return n, nil
+}
+
+// readChunk performs a single underlying read and decodes the result into p,
+// which must have room for at least one byte and find outBuf empty. Decoded
+// output beyond len(p) is staged in outBuf. Returns the bytes written into
+// p; pending errors and EOF are left on d for Read to report.
+func (d *decoder) readChunk(p []byte) int {
+	var nr int
 	for {
-		// read more encoded data
-		nr, readErr := d.r.Read(d.readBuf[:])
+		var readErr error
+		nr, readErr = d.r.Read(d.readBuf[:])
 		if readErr != nil && readErr != io.EOF {
 			// store error but process any data that was read
 			d.err = readErr
-			d.eof = true // treat terminal error as end of stream for decoding
+			d.eof = true // terminal error ends stream decoding
 			if nr == 0 {
-				return 0, readErr
+				return 0
 			}
-		} else if readErr == io.EOF {
+			break
+		}
+		if readErr == io.EOF {
 			d.eof = true
 		}
-		if nr == 0 && !d.eof && d.err == nil {
+		if nr == 0 && !d.eof {
 			// reader returned (0, nil), bounded retry then give up
 			d.emptyReads++
 			if d.emptyReads >= maxConsecutiveEmptyReads {
 				d.err = io.ErrNoProgress
-				return 0, d.err
+				return 0
 			}
 			runtime.Gosched()
 			continue
 		}
 		d.emptyReads = 0
+		break
+	}
 
-		chunkStart := d.streamPos
-		d.streamPos += int64(nr)
+	chunkStart := d.streamPos
+	d.streamPos += int64(nr)
 
-		// filter whitespace and padding, combine with buffered encoded data
-		filtered := make([]byte, 0, d.nenc+nr)
-		filtered = append(filtered, d.encBuf[:d.nenc]...)
-		d.nenc = 0
-		for i, c := range d.readBuf[:nr] {
-			if d.enc.padChar != NoPadding && rune(c) == d.enc.padChar {
-				filtered = append(filtered, c)
-				continue
-			} else if (c == ' ' || c == '\t' || c == '\n' || c == '\r') && d.enc.decodeMap[c] == 0xFF {
-				continue
-			} else if d.enc.decodeMap[c] == 0xFF {
-				d.err = CorruptInputError(chunkStart + int64(i))
-				return 0, d.err
-			}
+	// filter whitespace into the reusable scratch, combining with any
+	// held-back partial block; padding chars are kept for decode validation
+	if d.filterBuf == nil {
+		d.filterBuf = make([]byte, 0, len(d.readBuf)+len(d.encBuf))
+	}
+	filtered := append(d.filterBuf[:0], d.encBuf[:d.nenc]...)
+	d.nenc = 0
+	for i, c := range d.readBuf[:nr] {
+		if d.enc.padChar != NoPadding && rune(c) == d.enc.padChar {
 			filtered = append(filtered, c)
+		} else if d.enc.decodeMap[c] != 0xFF {
+			filtered = append(filtered, c)
+		} else if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			d.err = CorruptInputError(chunkStart + int64(i))
+			return 0
 		}
+	}
 
-		// if not at EOF, buffer incomplete block for next read
-		if !d.eof {
-			remainder := len(filtered) % 5
-			if remainder > 0 {
-				d.nenc = copy(d.encBuf[:], filtered[len(filtered)-remainder:])
-				filtered = filtered[:len(filtered)-remainder]
-			}
+	// hold back an incomplete block until its final char arrives
+	if !d.eof {
+		if remainder := len(filtered) % 5; remainder > 0 {
+			d.nenc = copy(d.encBuf[:], filtered[len(filtered)-remainder:])
+			filtered = filtered[:len(filtered)-remainder]
 		}
+	}
 
-		if len(filtered) == 0 {
-			if d.eof {
-				if d.err == nil {
-					d.err = io.EOF
-				}
-				return 0, d.err
-			} else if d.err != nil {
-				return 0, d.err
-			}
-			continue // need more data
-		}
+	if len(filtered) == 0 {
+		return 0 // nothing decodable, Read keeps pulling or reports pending err/eof
+	}
 
-		// decode the filtered data
-		decoded := make([]byte, d.enc.DecodedLen(len(filtered)))
-		nd, decErr := d.enc.decodeFiltered(decoded, filtered)
+	need := d.enc.DecodedLen(len(filtered))
+	if need <= len(p) {
+		// p holds the full decode, skip the intermediate buffer entirely
+		nd, decErr := d.enc.decodeFiltered(p[:need], filtered)
 		if decErr != nil {
 			// approximate offset, error lies within this read's chunk
 			d.err = CorruptInputError(chunkStart)
-			// still return what we decoded
-			n = copy(p, decoded[:nd])
-			if n < nd {
-				d.outBuf = decoded[n:nd]
-			}
-			if n > 0 {
-				return n, nil // defer error until buffer drained
-			}
-			return 0, d.err
 		}
-
-		// copy to output
-		n = copy(p, decoded[:nd])
-		if n < nd {
-			d.outBuf = decoded[n:nd]
-		}
-		return n, nil
+		return nd
 	}
+
+	// p is too small, decode into the reusable scratch and stage the excess
+	if cap(d.decBuf) < need {
+		d.decBuf = make([]byte, need)
+	}
+	nd, decErr := d.enc.decodeFiltered(d.decBuf[:need], filtered)
+	if decErr != nil {
+		d.err = CorruptInputError(chunkStart)
+	}
+	c := copy(p, d.decBuf[:nd])
+	if c < nd {
+		d.outBuf = d.decBuf[c:nd]
+	}
+	return c
 }
 
 // CorruptInputError is returned by Decode when the input contains invalid base85 data.

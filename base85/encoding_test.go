@@ -899,6 +899,140 @@ func TestStreamDecoderZeroReads(t *testing.T) {
 	}
 }
 
+func TestStreamDecoderDrainLoop(t *testing.T) {
+	t.Parallel()
+
+	// 8KB payload so one Read must consume many underlying chunks
+	input := make([]byte, 8*1024)
+	for i := range input {
+		input[i] = byte(i * 31)
+	}
+
+	t.Run("large_buffer_spans_reads", func(t *testing.T) {
+		t.Parallel()
+
+		encoded := []byte(RFC1924.EncodeToString(input))
+		dec := NewDecoder(RFC1924, &chunkReader{data: encoded, chunkSize: 64})
+
+		buf := make([]byte, 4096)
+		n, err := dec.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, 4096, n) // a single Read consumes many underlying reads
+
+		decoded := append([]byte(nil), buf[:n]...)
+		for {
+			n, err = dec.Read(buf)
+			decoded = append(decoded, buf[:n]...)
+			if err == io.EOF {
+				break
+			}
+			require.NoError(t, err)
+		}
+		assert.Equal(t, input, decoded)
+	})
+
+	t.Run("read_larger_than_stream", func(t *testing.T) {
+		t.Parallel()
+
+		input := []byte("Hello, World!")
+		encoded := []byte(RFC1924.EncodeToString(input))
+		dec := NewDecoder(RFC1924, bytes.NewReader(encoded))
+
+		buf := make([]byte, 4096)
+		n, err := dec.Read(buf)
+		assert.Equal(t, input, buf[:n])
+		require.ErrorIs(t, err, io.EOF) // data and EOF may arrive in one call
+
+		n, err = dec.Read(buf)
+		assert.Zero(t, n)
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("interleaved_read_sizes", func(t *testing.T) {
+		t.Parallel()
+
+		encoded := []byte(RFC1924.EncodeToString(input))
+		dec := NewDecoder(RFC1924, bytes.NewReader(encoded))
+
+		// small reads exercise the staging scratch, large reads the fast path
+		small := make([]byte, 3)
+		decoded := make([]byte, 0, len(input))
+		for i := 0; i < 10; i++ {
+			n, err := dec.Read(small)
+			require.NoError(t, err)
+			decoded = append(decoded, small[:n]...)
+		}
+		large := make([]byte, 4096)
+		for {
+			n, err := dec.Read(large)
+			decoded = append(decoded, large[:n]...)
+			if err == io.EOF {
+				break
+			}
+			require.NoError(t, err)
+		}
+		assert.Equal(t, input, decoded)
+	})
+
+	t.Run("whitespace_and_padded_large_reads", func(t *testing.T) {
+		t.Parallel()
+
+		paddedEnc := RFC1924.WithPadding('.')
+
+		var paddedStream []byte
+		for i := 0; i < len(input); i += 3 {
+			end := i + 3
+			if end > len(input) {
+				end = len(input)
+			}
+			paddedStream = paddedEnc.AppendEncode(paddedStream, input[i:end])
+		}
+
+		variants := []struct {
+			name    string
+			enc     *Encoding
+			encoded []byte
+		}{
+			{"whitespace", RFC1924, laceWhitespace([]byte(RFC1924.EncodeToString(input)))},
+			{"padded", paddedEnc, paddedStream},
+		}
+
+		for _, tc := range variants {
+			t.Run(tc.name, runDecodeAllCase(tc.enc, tc.encoded, input))
+		}
+	})
+
+	t.Run("corrupt_after_drain", func(t *testing.T) {
+		t.Parallel()
+
+		// valid blocks then a corrupt char in a later underlying chunk; the
+		// chunk holding the corrupt char contributes no decoded output
+		encoded := []byte(RFC1924.EncodeToString(input[:1024]) + "[")
+		dec := NewDecoder(RFC1924, &chunkReader{data: encoded, chunkSize: 50})
+
+		buf := make([]byte, 4096)
+		n, err := dec.Read(buf)
+		require.Error(t, err)
+		assert.Equal(t, 1000, n) // fully-read chunks decoded before the error
+
+		var corruptErr CorruptInputError
+		assert.ErrorAs(t, err, &corruptErr)
+	})
+}
+
+// runDecodeAllCase captures decode inputs and returns the parallel subtest
+// asserting a full stream decode matches want.
+func runDecodeAllCase(enc *Encoding, encoded, want []byte) func(t *testing.T) {
+	return func(t *testing.T) {
+		t.Parallel()
+
+		dec := NewDecoder(enc, bytes.NewReader(encoded))
+		decoded, err := io.ReadAll(dec)
+		require.NoError(t, err)
+		assert.Equal(t, want, decoded)
+	}
+}
+
 func TestPaddedDecoding(t *testing.T) {
 	t.Parallel()
 
